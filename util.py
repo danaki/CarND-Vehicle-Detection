@@ -3,8 +3,16 @@ import cv2
 import numpy as np
 from skimage.feature import hog
 from joblib import Memory
+from sklearn.cross_validation import train_test_split
+from sklearn.svm import LinearSVC
+from scipy.ndimage.measurements import label
+import matplotlib.pyplot as plt
+import glob
 
 memory = Memory(cachedir='cache')
+
+def traverse_train_dataset(base_dir, dirs):
+    return np.concatenate([[f for f in glob.glob('%s/%s/*.png' % (base_dir, d))] for d in dirs])
 
 def data_look(car_list, notcar_list):
     data_dict = {}
@@ -25,36 +33,6 @@ def draw_boxes(img, bboxes, color=(0, 0, 255), thick=6):
         cv2.rectangle(draw_img, bbox[0], bbox[1], color, thick)
         
     return draw_img
-
-# Define a function to search for template matches
-# and return a list of bounding boxes
-def find_matches(img, template_list):
-    # Define an empty list to take bbox coords
-    bbox_list = []
-    # Define matching method
-    # Other options include: cv2.TM_CCORR_NORMED', 'cv2.TM_CCOEFF', 'cv2.TM_CCORR',
-    #         'cv2.TM_SQDIFF', 'cv2.TM_SQDIFF_NORMED'
-    method = cv2.TM_CCOEFF_NORMED
-    # Iterate through template list
-    for temp in template_list:
-        # Read in templates one by one
-        tmp = mpimg.imread(temp)
-        # Use cv2.matchTemplate() to search the image
-        result = cv2.matchTemplate(img, tmp, method)
-        # Use cv2.minMaxLoc() to extract the location of the best match
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
-        # Determine a bounding box for the match
-        w, h = (tmp.shape[1], tmp.shape[0])
-        if method in [cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED]:
-            top_left = min_loc
-        else:
-            top_left = max_loc
-        bottom_right = (top_left[0] + w, top_left[1] + h)
-        # Append bbox position to list
-        bbox_list.append((top_left, bottom_right))
-        # Return the list of bounding boxes
-        
-    return bbox_list
 
 # Define a function to compute color histogram features  
 def color_hist_rgb(img, nbins=32, bins_range=(0, 256)):
@@ -107,7 +85,7 @@ def get_hog_features(img, orient, pix_per_cell, cell_per_block, vis=False, featu
     
 def single_img_features(image, conv=None, spatial_size=(32, 32),
                         hist_bins=32, orient=9, 
-                        pix_per_cell=8, cell_per_block=2, hog_channel=0,
+                        pix_per_cell=8, cell_per_block=2,
                         spatial_feat=True, hist_feat=True, hog_feat=True):
 
     feature_image = np.copy(image) if conv is None else cv2.cvtColor(image, conv)
@@ -123,15 +101,11 @@ def single_img_features(image, conv=None, spatial_size=(32, 32),
     hog_features = []            
     if hog_feat == True:
         # Call get_hog_features() with vis=False, feature_vec=True
-        if hog_channel == 'ALL':
-            for channel in range(feature_image.shape[2]):
-                hog_features.append(get_hog_features(feature_image[:,:,channel], 
-                                    orient, pix_per_cell, cell_per_block, 
-                                    vis=False, feature_vec=True))
-            hog_features = np.ravel(hog_features)        
-        else:
-            hog_features = get_hog_features(feature_image[:,:,hog_channel], orient, 
-                        pix_per_cell, cell_per_block, vis=False, feature_vec=True)
+        for channel in range(feature_image.shape[2]):
+            hog_features.append(get_hog_features(feature_image[:,:,channel], 
+                                                 orient, pix_per_cell, cell_per_block, 
+                                                 vis=False, feature_vec=True))
+        hog_features = np.ravel(hog_features)        
 
     return np.concatenate([spatial_features, hist_features, hog_features])
         
@@ -152,98 +126,6 @@ def extract_features(imgs, *args, **kwargs):
 
     return features
 
-# Define a function that takes an image,
-# start and stop positions in both x and y, 
-# window size (x and y dimensions),  
-# and overlap fraction (for both x and y)
-def slide_window(img, x_start_stop=[None, None], y_start_stop=[None, None], 
-                    xy_window=(64, 64), xy_overlap=(0.5, 0.5)):
-    # If x and/or y start/stop positions not defined, set to image size
-    if x_start_stop[0] == None:
-        x_start_stop[0] = 0
-    if x_start_stop[1] == None:
-        x_start_stop[1] = img.shape[1]
-    if y_start_stop[0] == None:
-        y_start_stop[0] = 0
-    if y_start_stop[1] == None:
-        y_start_stop[1] = img.shape[0]
-        
-    # Compute the span of the region to be searched    
-    xspan = x_start_stop[1] - x_start_stop[0]
-    yspan = y_start_stop[1] - y_start_stop[0]
-    
-    # Compute the number of pixels per step in x/y
-    nx_pix_per_step = np.int(xy_window[0]*(1 - xy_overlap[0]))
-    ny_pix_per_step = np.int(xy_window[1]*(1 - xy_overlap[1]))
-    
-    # Compute the number of windows in x/y
-    nx_buffer = np.int(xy_window[0]*(xy_overlap[0]))
-    ny_buffer = np.int(xy_window[1]*(xy_overlap[1]))
-    nx_windows = np.int((xspan-nx_buffer)/nx_pix_per_step) 
-    ny_windows = np.int((yspan-ny_buffer)/ny_pix_per_step) 
-    
-    # Initialize a list to append window positions to
-    window_list = []
-    
-    # Loop through finding x and y window positions
-    # Note: you could vectorize this step, but in practice
-    # you'll be considering windows one by one with your
-    # classifier, so looping makes sense
-    for ys in range(ny_windows):
-        for xs in range(nx_windows):
-            # Calculate window position
-            startx = xs*nx_pix_per_step + x_start_stop[0]
-            endx = startx + xy_window[0]
-            starty = ys*ny_pix_per_step + y_start_stop[0]
-            endy = starty + xy_window[1]
-            # Append window position to list
-            window_list.append(((startx, starty), (endx, endy)))
-
-    return window_list
-
-# Define a function you will pass an image 
-# and the list of windows to be searched (output of slide_windows())
-def search_windows(img, windows, clf, scaler, color_space='RGB', 
-                    spatial_size=(32, 32), hist_bins=32, 
-                    hist_range=(0, 256), orient=9, 
-                    pix_per_cell=8, cell_per_block=2, 
-                    hog_channel=0, spatial_feat=True, 
-                    hist_feat=True, hog_feat=True):
-
-    #1) Create an empty list to receive positive detection windows
-    on_windows = []
-    
-    #2) Iterate over all windows in the list
-    for window in windows:
-        #3) Extract the test window from original image
-        
-        test_img = cv2.resize(img[window[0][1]:window[1][1], window[0][0]:window[1][0]], (64, 64))      
-        
-        #4) Extract features for that window using single_img_features()
-        features = single_img_features(test_img,
-                                       color_space=color_space,
-                                       spatial_size=spatial_size,
-                                       hist_bins=hist_bins, 
-                                       orient=orient,
-                                       pix_per_cell=pix_per_cell, 
-                                       cell_per_block=cell_per_block, 
-                                       hog_channel=hog_channel,
-                                       spatial_feat=spatial_feat, 
-                                       hist_feat=hist_feat,
-                                       hog_feat=hog_feat)
-        
-        #5) Scale extracted features to be fed to classifier
-        test_features = scaler.transform(np.array(features).reshape(1, -1))
-        
-        #6) Predict using your classifier
-        prediction = clf.predict(test_features)
-        
-        #7) If positive (prediction == 1) then save the window
-        if prediction == 1:
-            on_windows.append(window)
-            
-    #8) Return windows for positive detections
-    return on_windows
     
 # Define a single function that can extract features using hog sub-sampling and make predictions
 def find_cars(img, conv, ystart, ystop, scale, svc, X_scaler, orient, pix_per_cell, cell_per_block, spatial_size, hist_bins):
@@ -275,8 +157,8 @@ def find_cars(img, conv, ystart, ystop, scale, svc, X_scaler, orient, pix_per_ce
     window = 64
     nblocks_per_window = (window // pix_per_cell)-1 
     cells_per_step = 2  # Instead of overlap, define how many cells to step
-    nxsteps = (nxblocks - nblocks_per_window) // cells_per_step
-    nysteps = (nyblocks - nblocks_per_window) // cells_per_step
+    nxsteps = (nxblocks - nblocks_per_window) // cells_per_step + 1
+    nysteps = (nyblocks - nblocks_per_window) // cells_per_step + 1
     
     rectangles = []
     for xb in range(nxsteps):
@@ -295,7 +177,7 @@ def find_cars(img, conv, ystart, ystop, scale, svc, X_scaler, orient, pix_per_ce
             ytop = ypos * pix_per_cell
 
             # Extract the image patch
-            subimg = cv2.resize(ctrans_tosearch[ytop:ytop+window, xleft:xleft+window], (64,64))
+            subimg = cv2.resize(ctrans_tosearch[ytop:ytop+window, xleft:xleft+window], (64, 64))
           
             # Get color features
             spatial_features = bin_spatial(subimg, size=spatial_size)
@@ -314,6 +196,50 @@ def find_cars(img, conv, ystart, ystop, scale, svc, X_scaler, orient, pix_per_ce
                 rectangles.append(((xbox_left, ytop_draw+ystart),(xbox_left+win_draw,ytop_draw+win_draw+ystart)))
                 
     return rectangles
+
+def slide_window(img, ystart, ystop, pix_per_cell, cell_per_block, scale): 
+    window = 64 * scale
+    pix_per_cell = pix_per_cell * scale
+    
+    # Define blocks and steps as above
+    nxblocks = (img.shape[1] // pix_per_cell)-1
+    nyblocks = ((ystop - ystart) // pix_per_cell)-1 
+    
+    # 64 was the orginal sampling rate, with 8 cells and 8 pix per cell
+    nblocks_per_window = (window // pix_per_cell)-1 
+    cells_per_step = 2  # Instead of overlap, define how many cells to step
+    nxsteps = int((nxblocks - nblocks_per_window) // cells_per_step) + 1
+    nysteps = int((nyblocks - nblocks_per_window) // cells_per_step) + 1
+    
+    window_list = []
+    for xb in range(nxsteps):
+        for yb in range(nysteps):
+            ypos = yb * cells_per_step
+            xpos = xb * cells_per_step
+
+            xleft = xpos * pix_per_cell
+            ytop = ypos * pix_per_cell + ystart
+
+            window_list.append(((xleft, ytop), (xleft + window, ytop + window)))
+
+    return window_list
+
+def scale_steps(scale_start, scale_end, step):
+    steps = int((scale_end - scale_start) / step)
+    return scale_start + np.arange(steps) * step
+
+def find_cars_multiscaled(image, scales, *args, **kwargs):
+    car_boxes = []
+    
+    for scale in scales:
+        scale_boxes = find_cars(image, scale=scale, *args, **kwargs)
+        
+        if (len(scale_boxes) > 0):
+            # Fix np.concatenate() ValueError: all the input arrays must have same number of dimensions
+            car_boxes.append(scale_boxes)
+
+    # Fix ValueError: need at least one array to concatenate
+    return np.concatenate(car_boxes) if len(car_boxes) > 0 else []
 
 def visualize_found_cars(img, bbox_list):
     draw_img = np.copy(img)
@@ -352,3 +278,54 @@ def draw_labeled_bboxes(img, labels):
         cv2.rectangle(img, bbox[0], bbox[1], (0,0,255), 6)
 
     return img
+
+@memory.cache
+def train_svc(scaled_X, y):
+    # Split up data into randomized training and test sets
+    rand_state = np.random.randint(0, 100)
+    X_train, X_test, y_train, y_test = train_test_split(
+        scaled_X, y, test_size=0.2, random_state=rand_state)
+
+    svc = LinearSVC()
+
+    svc.fit(X_train, y_train)
+    
+    return svc, svc.score(X_test, y_test)
+
+def get_heatmap(image, *args, **kwargs):
+    car_boxes = find_cars_multiscaled(image, *args, **kwargs)
+    
+    heat = np.zeros_like(image[:,:,0]).astype(np.float)
+    heat = add_heat(heat, car_boxes)
+    
+    return heat
+
+def annotate_frame(image, thresh=0, *args, **kwargs):
+    heat = get_heatmap(image, *args, **kwargs)
+    
+    if thresh > 0:
+        heat = apply_threshold(heat, thresh)
+    
+    labels = label(heat)
+    
+    return draw_labeled_bboxes(np.copy(image), labels)
+
+def plot_annotate_and_heatmap(image, thresh=0, *args, **kwargs):
+    heat = get_heatmap(image, *args, **kwargs)
+    
+    heat = apply_threshold(heat, thresh)
+
+    heatmap = np.clip(heat, 0, 255)
+
+    # Find final boxes from heatmap using label function
+    labels = label(heatmap)
+    draw_img = draw_labeled_bboxes(np.copy(image), labels)
+
+    fig = plt.figure()
+    plt.subplot(121)
+    plt.imshow(draw_img)
+    plt.title('Car Positions')
+    plt.subplot(122)
+    plt.imshow(heatmap, cmap='hot')
+    plt.title('Heat Map')
+    fig.tight_layout()
